@@ -1,3 +1,4 @@
+#import <Vision/Vision.h>
 // Album redesign: the header the Music app gives an album (iOS 26.4), the same one the playlist redesign
 // gives a playlist. The cover runs full bleed across the top of the page and dissolves into the page's
 // color; the title, the artist and the kind and date are centered on the bottom of that dissolve; and under
@@ -324,10 +325,70 @@ static void *kReadyContext = &kReadyContext;
 // `late` is a cover that arrived after the header had laid out -- an album opened for the first time, whose
 // artwork is still being fetched while the page is already on screen. The log line says once that the watch,
 // and not one of the header's passes, is what filled the hero.
+- (void)sgr_focusFacesInImage:(UIImage *)image {
+    if (!image || !image.CGImage) return;
+    CGSize viewSize = _picture.bounds.size;
+    CGSize imgSize = image.size;
+    if (viewSize.width <= 0 || viewSize.height <= 0 || imgSize.width <= 0 || imgSize.height <= 0) return;
+
+    // Calculate visible height fraction when AspectFill crops top & bottom on wide screens
+    CGFloat imgAspect = imgSize.width / imgSize.height;
+    CGFloat viewAspect = viewSize.width / viewSize.height;
+    if (viewAspect <= imgAspect) {
+        _picture.layer.contentsRect = CGRectMake(0, 0, 1, 1);
+        return;
+    }
+    CGFloat visibleFraction = imgAspect / viewAspect; // e.g., 0.56 on iPad landscape
+
+    CGImageRef cgImg = image.CGImage;
+    __weak SGRAlbumHero *weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        VNDetectFaceRectanglesRequest *req = [[VNDetectFaceRectanglesRequest alloc] init];
+        VNImageRequestHandler *handler = [[VNImageRequestHandler alloc] initWithCGImage:cgImg options:@{}];
+        if (![handler performRequests:@[req] error:nil]) return;
+
+        NSArray<VNFaceObservation *> *faces = req.results;
+        if (faces.count == 0) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                weakSelf.picture.layer.contentsRect = CGRectMake(0, 0, 1, 1);
+            });
+            return;
+        }
+
+        // Vision coordinates have origin at bottom-left (0..1); convert highest face top to UIKit top-left (0..1)
+        CGFloat highestFaceTopUIKit = 1.0;
+        for (VNFaceObservation *face in faces) {
+            CGRect b = face.boundingBox;
+            CGFloat faceTopUIKit = 1.0 - (b.origin.y + b.size.height);
+            // Add generous headroom above forehead/hair (45% of face height)
+            CGFloat headTopUIKit = MAX(0.0, faceTopUIKit - b.size.height * 0.45);
+            if (headTopUIKit < highestFaceTopUIKit) {
+                highestFaceTopUIKit = headTopUIKit;
+            }
+        }
+
+        // Default center crop starts at (1.0 - visibleFraction) / 2.0
+        CGFloat defaultTop = (1.0 - visibleFraction) * 0.5;
+        CGFloat targetTop = defaultTop;
+        if (highestFaceTopUIKit < defaultTop) {
+            targetTop = MAX(0.0, highestFaceTopUIKit - 0.03);
+        }
+
+        // Shift contentsRect vertically while keeping AspectFill scale intact
+        CGFloat offsetY = targetTop - defaultTop;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            SGRAlbumHero *hero = weakSelf;
+            if (!hero || hero.picture.image != image) return;
+            hero.picture.layer.contentsRect = CGRectMake(0, offsetY, 1, 1);
+        });
+    });
+}
+
 - (void)takeCover:(UIImageView *)source late:(BOOL)late {
     UIImage *image = source.image;
     if (!image || source.bounds.size.width < kMinCover || _picture.image == image) return;
     _picture.image = image;
+    [self sgr_focusFacesInImage:image];
     // The page's field takes its color from the same picture.
     SGRAlbumSetArtwork(self, image);
     static BOOL logged;
