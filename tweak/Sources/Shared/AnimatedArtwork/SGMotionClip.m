@@ -148,7 +148,7 @@ BOOL SGMotionClipShape(NSURL *file, CGFloat ratio, NSURL *out) {
     dispatch_semaphore_t written = dispatch_semaphore_create(0);
     [writer finishWritingWithCompletionHandler:^{ dispatch_semaphore_signal(written); }];
     dispatch_semaphore_wait(written, DISPATCH_TIME_FOREVER);
-    if (writer.status != AVAssetStatusCompleted) return NO;
+    if (writer.status != AVAssetWriterStatusCompleted) return NO;
     [NSFileManager.defaultManager removeItemAtURL:out error:nil];
     return [NSFileManager.defaultManager moveItemAtURL:partial toURL:out error:nil];
 }
