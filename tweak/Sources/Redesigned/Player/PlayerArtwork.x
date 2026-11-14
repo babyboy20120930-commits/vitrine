@@ -1,32 +1,19 @@
-// Player redesign: the cover sits on the field with continuous corners and a soft shadow, and shrinks
-// back while playback is paused, the way the Music app's does. Spotify's lyric preview under it, and the cover's size
-// beside it, are Spotify's, as its own lyrics setting has them.
-//
-// Tree (trees/clean/player/01.txt:36-43): CoverArtCellImpl > ... > CoverArtTiltView 354x354 > an
-// ElementView the same size > ImageViewProxy > Encore.ImageView (clips) > UIImageView, with
-// Lyrics_NPVContainerKit.LyricsContainerView under the tilt view. The ElementView is what gets the
-// corners and the scale: the tilt view's own transform is left to the tilt Spotify gives it when the
-// cover is inspected. The image clips, so the shadow is a plate of the Kit's behind it.
-//
-// A paused cover keeps its shrink while the player opens and closes: the morph flies the bar's cover to
-// the frame the cover is drawn at, transform included (SGRPlayerCoverFrameIn), so it lands at the size it
-// stays at. Holding it at full size through the transition made it land large and spring down after, or
-// grow before a close.
 #import "Core/SGCore.h"
+#import "Core/SGMVManager.h"
 #import "Redesigned/Kit/SGRKit.h"
 #import "Shared/Haptics/Haptics.h"
 #import "Shared/Player/SpeedPitch.h"
+#import "Shared/Player/PlayerState.h"
 #import "Player.h"
 
 static const CGFloat kPausedScale = 0.84;
-// The bar's 40pt cover lives in a tilt view of its own; the player's is 354.
 static const CGFloat kCoverMinWidth = 200;
 
 static char kPlateKey;
+static char kMVButtonKey;
 static NSHashTable<UIView *> *sg_tilts;
-// The cover of each tilt view once found. A frame Spotify sets on a scaled view becomes its scaled
-// size, leaving bounds that no longer match the tilt view's, so the cover is not looked for by size again.
 static NSMapTable<UIView *, UIView *> *sg_covers;
+static NSTimer *sg_mvSyncTimer;
 
 static CGFloat currentScale(void) {
     SPTPlayerState *state = SGPlayerState();
@@ -34,7 +21,6 @@ static CGFloat currentScale(void) {
     return SGRReduceMotion() ? 1 : kPausedScale;
 }
 
-// The child of the tilt view the size of the cover.
 static UIView *coverIn(UIView *tilt) {
     UIView *cover = [sg_covers objectForKey:tilt];
     if (cover.superview == tilt) return cover;
@@ -67,8 +53,6 @@ static void scaleCover(UIView *tilt, CGFloat scale) {
 
 #pragma mark - where the cover is
 
-// The tilt view of the cover on screen: the queue is a cover per cell and the cells out of view are
-// kept hidden (player/02.txt:521), so the one showing is the one in a window with nothing hidden over it.
 static UIView *showingTilt(void) {
     for (UIView *tilt in sg_tilts) {
         if (!tilt.window) continue;
@@ -89,7 +73,6 @@ UIView *SGRPlayerCoverList(void) {
 CGRect SGRPlayerCoverFrameIn(UIView *host) {
     UIView *tilt = showingTilt();
     UIView *cover = coverIn(tilt);
-    // The cover's own transform is the paused shrink, which is what the eye sees it at.
     return cover && host ? [host convertRect:cover.bounds fromView:cover] : CGRectNull;
 }
 
@@ -100,8 +83,6 @@ CGFloat SGRPlayerCoverScale(void) {
 CGRect SGRPlayerArtworkAreaIn(UIView *host) {
     UIView *tilt = showingTilt();
     if (!tilt || !host) return CGRectNull;
-    // The band is the first view over the cover as wide as the player: the cover sits inset inside it
-    // (01.txt:33-36, CoverArtCellImpl > UIView {0, 110, 402, 466.67} > UIView {24, 8, ...} > the tilt view).
     for (UIView *v = tilt.superview; v; v = v.superview) {
         if (v == host) break;
         if (v.bounds.size.width >= host.bounds.size.width - 1) return [host convertRect:v.bounds fromView:v];
@@ -109,7 +90,6 @@ CGRect SGRPlayerArtworkAreaIn(UIView *host) {
     return CGRectNull;
 }
 
-// The cover hidden for a stand-in, so the same one comes back if the list moved on meanwhile.
 static __weak UIView *sg_hiddenCover, *sg_hiddenPlate;
 
 void SGRPlayerSetCoverHidden(BOOL hidden) {
@@ -143,12 +123,62 @@ static void scaleEveryCover(BOOL animated) {
     else apply();
 }
 
+#pragma mark - External MV Toggle & Overlay
+
+static void updateMVButtonAppearance(UIButton *btn) {
+    BOOL isOn = [SGMVManager sharedManager].isVideoModeEnabled;
+    btn.tintColor = isOn ? [UIColor systemGreenColor] : [UIColor whiteColor];
+    btn.backgroundColor = isOn ? [[UIColor blackColor] colorWithAlphaComponent:0.75] : [[UIColor blackColor] colorWithAlphaComponent:0.45];
+}
+
+@interface SGRMVButtonHandler : NSObject
++ (instancetype)shared;
+- (void)didTapMVButton:(UIButton *)sender;
+@end
+
+@implementation SGRMVButtonHandler
++ (instancetype)shared {
+    static SGRMVButtonHandler *h;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ h = [SGRMVButtonHandler new]; });
+    return h;
+}
+- (void)didTapMVButton:(UIButton *)sender {
+    [[SGMVManager sharedManager] toggleVideoMode];
+    updateMVButtonAppearance(sender);
+    SGPlayFeedback(SGFeedbackGrab);
+}
+@end
+
+static void setupMVOverlayOn(UIView *tilt, UIView *cover) {
+    // Attach MV video layer onto the active cover
+    if (tilt == showingTilt() || showingTilt() == nil) {
+        [[SGMVManager sharedManager] attachToContainerView:cover];
+        [SGMVManager sharedManager].playerLayer.frame = cover.bounds;
+        [SGMVManager sharedManager].playerLayer.cornerRadius = SGRRadiusArtwork;
+    }
+
+    // Create floating glass-style "MV" toggle button at top-right of cover
+    UIButton *mvBtn = objc_getAssociatedObject(cover, &kMVButtonKey);
+    if (!mvBtn) {
+        mvBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:13 weight:UIImageSymbolWeightSemibold];
+        [mvBtn setImage:[UIImage systemImageNamed:@"video.fill" withConfiguration:cfg] forState:UIControlStateNormal];
+        [mvBtn setTitle:@" MV" forState:UIControlStateNormal];
+        mvBtn.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
+        mvBtn.layer.cornerRadius = 15;
+        mvBtn.clipsToBounds = YES;
+        [mvBtn addTarget:[SGRMVButtonHandler shared] action:@selector(didTapMVButton:) forControlEvents:UIControlEventTouchUpInside];
+        [cover addSubview:mvBtn];
+        objc_setAssociatedObject(cover, &kMVButtonKey, mvBtn, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    mvBtn.frame = CGRectMake(cover.bounds.size.width - 74, 12, 62, 30);
+    [cover bringSubviewToFront:mvBtn];
+    updateMVButtonAppearance(mvBtn);
+}
+
 #pragma mark - hold to play faster
 
-// Holding either side of the cover plays at kHoldSpeed until the finger lifts, and the speed set before
-// comes back. The middle third is left alone, and a hold that starts to move is a swipe to the next track.
-// It is a speed like the menu's, so with Pitch follows speed on (until switched off) it also plays an
-// octave higher, the way a record does. The native look's copy is in Native/Player/PlayerGestures.x.
 static const double kHoldSpeed = 2;
 static char kHoldKey, kBadgeGlassKey;
 
@@ -168,7 +198,7 @@ static char kHoldKey, kBadgeGlassKey;
         CGFloat x = [self locationInView:cover].x, third = cover.bounds.size.width / 3;
         if ((x > third && x < 2 * third) || !SGPlayerSpeedAllowed()) {
             self.enabled = NO;
-            self.enabled = YES;   // cancels this hold
+            self.enabled = YES;
             return;
         }
         _before = SGPlayerSpeed();
@@ -184,9 +214,6 @@ static char kHoldKey, kBadgeGlassKey;
     }
 }
 
-// "2×" and a forward glyph on the Kit's glass capsule at the top of the cover while it is held. What fades
-// is the glass's effect (SGRShowGlass), never an alpha over it; the capsule grows in from 0.9 with the Kit's
-// press spring and goes with its exit, quicker than it came: the finger is already off the cover.
 - (void)showBadge:(BOOL)shown on:(UIView *)cover {
     if (shown && !_badge) {
         _badgeLabel = [UILabel new];
@@ -208,7 +235,6 @@ static char kHoldKey, kBadgeGlassKey;
     if (!_badge) return;
     _badgeShown = shown;
     UIView *badge = _badge, *label = _badgeLabel;
-    // Made again by the Kit if Reduce Transparency changed: then it is a solid fill, which fades by alpha.
     UIView *shape = SGRGlassCapsuleInside(badge, &kBadgeGlassKey, badge.bounds.size, NO);
     void (^state)(BOOL) = ^(BOOL on) {
         SGRShowGlass(shape, on);
@@ -221,7 +247,6 @@ static char kHoldKey, kBadgeGlassKey;
             badge.transform = SGRReduceMotion() ? CGAffineTransformIdentity : CGAffineTransformMakeScale(0.9, 0.9);
             [cover addSubview:badge];
         }
-        // A fade alone under Reduce Motion, where the Kit's spring would be no animation at all.
         SGRAnimate(SGRReduceMotion() ? SGRMotionFade : SGRMotionPress, ^{
             state(YES);
             badge.transform = CGAffineTransformIdentity;
@@ -255,14 +280,16 @@ static void watchHold(UIView *tilt) {
     [sg_tilts addObject:tilt];
     watchHold(tilt);
     SGRPlayerMotionCoverLaidOut();
-    // The cover fills the tilt view (01.txt:37); bounds and center, unlike a frame, hold under the scale.
+
     CGRect bounds = tilt.bounds;
     CGPoint middle = CGPointMake(CGRectGetMidX(bounds), CGRectGetMidY(bounds));
     if (!CGSizeEqualToSize(cover.bounds.size, bounds.size)) cover.bounds = (CGRect){cover.bounds.origin, bounds.size};
     if (!CGPointEqualToPoint(cover.center, middle)) cover.center = middle;
-    // Its image is placed again for the new size (the ImageViewProxy hook below makes it fill the cover).
     for (UIView *image in cover.subviews) {
-        if (!CGRectEqualToRect(image.frame, cover.bounds)) image.bounds = image.bounds, image.center = image.center;
+        if (![image isKindOfClass:[UIButton class]] && !CGRectEqualToRect(image.frame, cover.bounds)) {
+            image.bounds = image.bounds;
+            image.center = image.center;
+        }
     }
 
     cover.layer.cornerRadius = SGRRadiusArtwork;
@@ -271,18 +298,13 @@ static void watchHold(UIView *tilt) {
     SGRShadowPlate *plate = SGRShadowPlateIn(tilt, &kPlateKey);
     plate.bounds = cover.bounds;
     plate.center = cover.center;
-    // The same value an animation in flight is heading to, so a layout pass never cuts one short.
     scaleCover(tilt, currentScale());
 
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{ SGLog(@"redesign player: cover %@ rounded %.0f with a shadow plate, scale %.2f", NSStringFromClass(cover.class), SGRRadiusArtwork, currentScale()); });
+    // Attach external MV layer and toggle button
+    setupMVOverlayOn(tilt, cover);
 }
 %end
 
-// The cover's image (ImageViewProxy > Encore.ImageView) keeps the size Spotify gave it for a cell with the preview,
-// 317 in a 345 box on a track with lyrics, at the box's top left: the image sat off center with a blank band right
-// and under it (issue #21). In the player's cover it fills the box the cover now is, whatever size it is given.
-// Auto Layout places it through its bounds and center, a frame set by hand through its frame.
 static UIView *coverOfImage(UIView *image) {
     UIView *box = image.superview;
     return box && coverIn(box.superview) == box ? box : nil;
@@ -301,8 +323,6 @@ static UIView *coverOfImage(UIView *image) {
     UIView *box = coverOfImage((UIView *)self);
     %orig(box ? CGPointMake(CGRectGetMidX(box.bounds), CGRectGetMidY(box.bounds)) : center);
 }
-// What it holds keeps its own 317 unless it is laid out to this view's size again: the Encore image view here,
-// and the image and placeholder in that (below).
 - (void)layoutSubviews {
     %orig;
     UIView *proxy = (UIView *)self;
@@ -326,7 +346,6 @@ static UIView *coverOfImage(UIView *image) {
 }
 %end
 
-
 @interface SGRPlayerArtworkWatcher : NSObject <SGPlayerStateObserver>
 @end
 
@@ -342,11 +361,25 @@ static UIView *coverOfImage(UIView *image) {
 
 - (void)playerStateDidChange:(SPTPlayerState *)state {
     NSInteger paused = state.isPaused ? 1 : 0;
-    if (paused == _paused) return;
-    _paused = paused;
-    scaleEveryCover(YES);
-    static NSUInteger logged;
-    if (logged++ < 3) SGLog(@"redesign player: state paused=%d loading=%d, %lu covers scaled", state.isPaused, state.isLoading, (unsigned long)sg_tilts.count);
+    if (paused != _paused) {
+        _paused = paused;
+        scaleEveryCover(YES);
+    }
+
+    // Fetch external MV when track changes
+    SPTPlayerTrack *track = state.track;
+    if (track.trackTitle.length > 0) {
+        NSString *artist = [track.artistName isKindOfClass:NSString.class] ? track.artistName : @"";
+        [[SGMVManager sharedManager] fetchMVForTrack:track.trackTitle artist:artist completion:^(BOOL hasVideo) {
+            UIView *tilt = showingTilt();
+            UIView *cover = coverIn(tilt);
+            if (cover) {
+                [[SGMVManager sharedManager] attachToContainerView:cover];
+                UIButton *btn = objc_getAssociatedObject(cover, &kMVButtonKey);
+                if (btn) btn.alpha = hasVideo ? 1.0 : 0.45;
+            }
+        }];
+    }
 }
 
 @end
@@ -360,8 +393,14 @@ static SGRPlayerArtworkWatcher *sg_artworkWatcher;
     sg_covers = [NSMapTable weakToWeakObjectsMapTable];
     sg_artworkWatcher = [SGRPlayerArtworkWatcher new];
     SGAddPlayerStateObserver(sg_artworkWatcher);
-    SGRequireClasses(@[
-        @"_TtC35CreativeWorkCommons_CoverArtTiltKit16CoverArtTiltView",
-        @"_TtC28NowPlaying_ContentLayersImpl16CoverArtCellImpl",
-    ]);
+
+    // Sync MV video timeline with Spotify playback every 0.4 seconds
+    sg_mvSyncTimer = [NSTimer scheduledTimerWithTimeInterval:0.4 repeats:YES block:^(NSTimer *timer) {
+        if (![SGMVManager sharedManager].isVideoModeEnabled) return;
+        SPTPlayerState *state = SGPlayerState();
+        if (!state) return;
+        NSTimeInterval pos = [state respondsToSelector:@selector(position)] ? state.position : 0;
+        [[SGMVManager sharedManager] syncWithPlaybackPosition:pos isPlaying:!state.isPaused];
+    }];
 }
+
