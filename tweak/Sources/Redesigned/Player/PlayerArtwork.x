@@ -153,29 +153,31 @@ static void updateMVButtonAppearance(UIButton *btn) {
 static void setupMVOverlayOn(UIView *tilt, UIView *cover) {
     // Attach MV video layer onto the active cover
     if (tilt == showingTilt() || showingTilt() == nil) {
-        [[SGMVManager sharedManager] attachToContainerView:cover];
-        [SGMVManager sharedManager].playerLayer.frame = cover.bounds;
-        [SGMVManager sharedManager].playerLayer.cornerRadius = SGRRadiusArtwork;
+    [[SGMVManager sharedManager] attachToContainerView:cover];
+    [SGMVManager sharedManager].playerLayer.frame = cover.bounds;
+    [SGMVManager sharedManager].playerLayer.cornerRadius = SGRRadiusArtwork;
     }
-
-    // Create floating glass-style "MV" toggle button at top-right of cover
-    UIButton *mvBtn = objc_getAssociatedObject(cover, &kMVButtonKey);
+    // Create floating glass-style "MV" toggle button on tilt (outside cover tap gesture)
+    UIButton *mvBtn = objc_getAssociatedObject(tilt, &kMVButtonKey);
     if (!mvBtn) {
-        mvBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:13 weight:UIImageSymbolWeightSemibold];
-        [mvBtn setImage:[UIImage systemImageNamed:@"video.fill" withConfiguration:cfg] forState:UIControlStateNormal];
-        [mvBtn setTitle:@" MV" forState:UIControlStateNormal];
-        mvBtn.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
-        mvBtn.layer.cornerRadius = 15;
-        mvBtn.clipsToBounds = YES;
-        [mvBtn addTarget:[SGRMVButtonHandler shared] action:@selector(didTapMVButton:) forControlEvents:UIControlEventTouchUpInside];
-        [cover addSubview:mvBtn];
-        objc_setAssociatedObject(cover, &kMVButtonKey, mvBtn, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    mvBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:13 weight:UIImageSymbolWeightSemibold];
+    [mvBtn setImage:[UIImage systemImageNamed:@"video.fill" withConfiguration:cfg] forState:UIControlStateNormal];
+    [mvBtn setTitle:@" MV" forState:UIControlStateNormal];
+    mvBtn.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+    mvBtn.layer.cornerRadius = 16;
+    mvBtn.clipsToBounds = YES;
+    mvBtn.exclusiveTouch = YES;
+    [mvBtn addTarget:[SGRMVButtonHandler shared] action:@selector(didTapMVButton:) forControlEvents:UIControlEventTouchUpInside];
+    [tilt addSubview:mvBtn];
+    objc_setAssociatedObject(tilt, &kMVButtonKey, mvBtn, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
-    mvBtn.frame = CGRectMake(cover.bounds.size.width - 74, 12, 62, 30);
-    [cover bringSubviewToFront:mvBtn];
+    CGRect coverFrame = cover.frame;
+    mvBtn.frame = CGRectMake(CGRectGetMaxX(coverFrame) - 78, CGRectGetMinY(coverFrame) + 12, 66, 32);
+    [tilt bringSubviewToFront:mvBtn];
     updateMVButtonAppearance(mvBtn);
 }
+
 
 #pragma mark - hold to play faster
 
@@ -375,7 +377,7 @@ static UIView *coverOfImage(UIView *image) {
             UIView *cover = coverIn(tilt);
             if (cover) {
                 [[SGMVManager sharedManager] attachToContainerView:cover];
-                UIButton *btn = objc_getAssociatedObject(cover, &kMVButtonKey);
+                UIButton *btn = objc_getAssociatedObject(tilt, &kMVButtonKey);
                 if (btn) btn.alpha = hasVideo ? 1.0 : 0.45;
             }
         }];
