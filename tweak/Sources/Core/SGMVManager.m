@@ -49,7 +49,7 @@
     // Build search query and call Piped API (YouTube third-party parser)
     NSString *rawQuery = [NSString stringWithFormat:@"%@ %@ Official MV", trackName, artistName ?: @""];
     NSString *query = [rawQuery stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
-    NSURL *searchURL = [NSURL URLWithString:[NSString stringWithFormat:@"https://kavin.rocks", query]];
+    NSURL *searchURL = [NSURL URLWithString:[NSString stringWithFormat:@"%@pipedapi.kavin.rocks/search?q=%@&filter=music_videos", @"https://", query]];
 
     [[[NSURLSession sharedSession] dataTaskWithURL:searchURL completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         if (error || !data) {
@@ -69,7 +69,7 @@
 }
 
 - (void)resolveStreamWithVideoId:(NSString *)videoId cacheKey:(NSString *)key completion:(void (^)(BOOL hasVideo))completion {
-    NSURL *streamInfoURL = [NSURL URLWithString:[NSString stringWithFormat:@"https://kavin.rocks%@", videoId]];
+            NSURL *streamInfoURL = [NSURL URLWithString:[NSString stringWithFormat:@"%@pipedapi.kavin.rocks/streams/%@", @"https://", videoId]];
     [[[NSURLSession sharedSession] dataTaskWithURL:streamInfoURL completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         if (error || !data) {
             dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(NO); });
