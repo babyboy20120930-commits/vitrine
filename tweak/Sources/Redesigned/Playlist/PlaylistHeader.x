@@ -1,3 +1,4 @@
+#import <Vision/Vision.h>
 // Playlist redesign: the header the Music app gives a playlist (iOS 26.4). The cover runs full bleed across
 // the top of the page and dissolves into the page's color; the title, the creator and the length are centered
 // on the bottom of that dissolve; under them one row -- shuffle, a white Play capsule, and save (someone
@@ -120,6 +121,7 @@ static UIView *firstOfClass(UIView *root, Class wanted) {
     __weak UIImageView *_cover;
 }
 
+
 - (instancetype)initWithFrame:(CGRect)frame {
     if (!(self = [super initWithFrame:frame])) return nil;
     self.userInteractionEnabled = NO;
@@ -165,6 +167,60 @@ static UIView *firstOfClass(UIView *root, Class wanted) {
     __weak SGRPlaylistHero *weakSelf = self;
     SGRObserveImage(source, ^(UIImageView *view) { [weakSelf takeCover:view late:YES]; });
 }
+- (void)sgr_focusFacesInImage:(UIImage *)image {
+    if (!image || !image.CGImage) return;
+    CGSize viewSize = _picture.bounds.size;
+    CGSize imgSize = image.size;
+    if (viewSize.width <= 0 || viewSize.height <= 0 || imgSize.width <= 0 || imgSize.height <= 0) return;
+
+    CGFloat imgAspect = imgSize.width / imgSize.height;
+    CGFloat viewAspect = viewSize.width / viewSize.height;
+    if (viewAspect <= imgAspect) {
+        _picture.layer.contentsRect = CGRectMake(0, 0, 1, 1);
+        return;
+    }
+    CGFloat visibleFraction = imgAspect / viewAspect;
+
+    CGImageRef cgImg = image.CGImage;
+    __weak SGRPlaylistHero *weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        VNDetectFaceRectanglesRequest *req = [[VNDetectFaceRectanglesRequest alloc] init];
+        VNImageRequestHandler *handler = [[VNImageRequestHandler alloc] initWithCGImage:cgImg options:@{}];
+        if (![handler performRequests:@[req] error:nil]) return;
+
+        NSArray<VNFaceObservation *> *faces = req.results;
+        if (faces.count == 0) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                weakSelf.picture.layer.contentsRect = CGRectMake(0, 0, 1, 1);
+            });
+            return;
+        }
+
+        CGFloat highestFaceTopUIKit = 1.0;
+        for (VNFaceObservation *face in faces) {
+            CGRect b = face.boundingBox;
+            CGFloat faceTopUIKit = 1.0 - (b.origin.y + b.size.height);
+            CGFloat headTopUIKit = MAX(0.0, faceTopUIKit - b.size.height * 0.45);
+            if (headTopUIKit < highestFaceTopUIKit) {
+                highestFaceTopUIKit = headTopUIKit;
+            }
+        }
+
+        CGFloat defaultTop = (1.0 - visibleFraction) * 0.5;
+        CGFloat targetTop = defaultTop;
+        if (highestFaceTopUIKit < defaultTop) {
+            targetTop = MAX(0.0, highestFaceTopUIKit - 0.03);
+        }
+
+        CGFloat offsetY = targetTop - defaultTop;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            SGRPlaylistHero *hero = weakSelf;
+            if (!hero || hero.picture.image != image) return;
+            hero.picture.layer.contentsRect = CGRectMake(0, offsetY, 1, 1);
+        });
+    });
+}
+
 
 // Spotify loads the artwork at the size the cover square is asking for, and the square shrinks as the
 // header collapses: scrolled down it swapped a 105px copy in for the 254px one and the picture across the
@@ -180,6 +236,7 @@ static UIView *firstOfClass(UIView *root, Class wanted) {
 
     self.coverPixels = image.size.width;
     _picture.image = image;
+[self sgr_focusFacesInImage:image];
     // The page's field takes its color from the same picture.
     SGRPlaylistSetArtwork(self, image);
     static BOOL logged;
